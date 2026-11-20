@@ -127,6 +127,10 @@ async function main() {
   if (ids.length < 10) throw new Error('商品IDをほとんど取得できませんでした。中断します');
 
   const [ja, en] = [await fetchCatalog(ids, 'ja-JP'), await fetchCatalog(ids, 'en-US')];
+  // 実績データ（ta-extras.json があればマージする）
+  let extras = {};
+  try { extras = JSON.parse(readFileSync(join(ROOT, 'ta-extras.json'), 'utf8')); } catch { extras = {}; }
+
   const items = [];
   let dropped = 0;
   for (const id of ids) {
@@ -158,6 +162,14 @@ async function main() {
   console.log(`掲載 ${items.length} 件 / 除外 ${dropped} 件`);
   if (items.length < 100) throw new Error('掲載件数が異常に少ないため中断します（ページを守るための安全装置）');
 
+  // 実績データを各アイテムへ付与
+  let taCount = 0;
+  for (const it of items) {
+    const x = extras[it.id];
+    if (x) { it.x = x; taCount++; }
+  }
+  console.log(`実績データ付与 ${taCount} 件`);
+
   const prevSet = new Set(oldIds);
   const newCount = items.filter((it) => !prevSet.has(it.id)).length;
   console.log(`新着 ${newCount} 件`);
@@ -184,6 +196,7 @@ async function main() {
   setSpan('covTotal', fmtNum(total));
   setSpan('covDropped', fmtNum(dropped));
   setSpan('covKept', fmtNum(items.length));
+  setSpan('taCov', fmtNum(taCount));
   html = html.replace(/<a id="srcLink" href="[^"]*"([^>]*)>[^<]*<\/a>/,
     `<a id="srcLink" href="${DEALS_URL}"$1>Microsoft Store 公式セールページ</a>`);
 
