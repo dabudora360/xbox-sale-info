@@ -34,7 +34,7 @@ Microsoft Store（日本）のセール対象ゲームを一覧できるペー�
 
 ## 仕組み
 
-- 取得元は Xbox 公式の「ブラック フライデー」専用チャンネル。ブラックフライデー終了後、チャンネルが空になったら Microsoft Store の通常セール一覧へ自動で切り替わります（ページ内の出典表記も追随します）
+- 取得元は Microsoft Store のセール一覧ページ（https://www.microsoft.com/ja-jp/store/deals/games/xbox）です
 - 価格・定価・セール開始/終了日時は Microsoft の DisplayCatalog API で確認した日本のストア価格です
 - 「新着（NEW）」は、前回の掲載リストに無かった商品です。前回リストはページ内に保持され、更新のたびに繰り上がります
 - 表紙画像は Microsoft の CDN への直接リンクです（ファイルは同梱しません）
