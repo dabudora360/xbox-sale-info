@@ -1,7 +1,7 @@
 # Xboxセール情報（GitHub Pages版）
 
 Microsoft Store（日本）のセール対象ゲームを一覧できるページです。
-**火曜・木曜 09:30（日本時間）に GitHub Actions が自動で最新情報へ更新します。手作業も承認も要りません。**
+**毎日 09:30（日本時間）に GitHub Actions が自動で最新情報へ更新します。手作業も承認も要りません。**
 
 ## ファイル構成
 
@@ -9,7 +9,7 @@ Microsoft Store（日本）のセール対象ゲームを一覧できるペー�
 |---|---|
 | `index.html` | ページ本体（商品データ込み）。自動更新で書き換わります |
 | `scripts/update.mjs` | 取得・差し替えスクリプト（Node 18+、外部ライブラリなし） |
-| `.github/workflows/update.yml` | 定期実行の設定（火・木 09:30 JST） |
+| `.github/workflows/update.yml` | 定期実行の設定（毎日 09:30 JST） |
 
 ## 設置手順（初回だけ）
 
