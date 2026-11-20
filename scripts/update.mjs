@@ -2,6 +2,7 @@
 // 1. Microsoft Store のセール一覧ページから対象商品IDを全件取得
 // 2. DisplayCatalog API で価格・定価・開始/終了日時・日英タイトル・表紙を補完
 // 3. index.html の ITEMS / PREV_IDS / 日時・件数・出典表記を差し替える
+// 4. 価格履歴（price-history.json）に今日の価格を記録し、グラフ用データを index.html へ埋め込む
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,6 +115,13 @@ function nowJstLabel() {
 }
 const fmtNum = (n) => n.toLocaleString('en-US');
 
+// JST の yyyy-mm-dd
+function jstDateOf(date) {
+  const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  const v = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${v.year}-${v.month}-${v.day}`;
+}
+
 async function main() {
   let html = readFileSync(INDEX, 'utf8');
   const itemsSpan = extractArray(html, 'var ITEMS =');
@@ -174,6 +182,31 @@ async function main() {
   const newCount = items.filter((it) => !prevSet.has(it.id)).length;
   console.log(`新着 ${newCount} 件`);
 
+  // ---- 価格履歴の記録 ----
+  // { id: [[yyyy-mm-dd, price], ...] }。初出はセール開始日（60日以内なら）を、その後は価格が変わった日だけ点を打つ
+  let hist = {};
+  try { hist = JSON.parse(readFileSync(join(ROOT, 'price-history.json'), 'utf8')); } catch { hist = {}; }
+  const today = jstDateOf(new Date());
+  let histNew = 0, histChanged = 0;
+  for (const it of items) {
+    const pts = hist[it.id];
+    if (!Array.isArray(pts) || !pts.length) {
+      let seed = today;
+      if (it.start) {
+        const sd = jstDateOf(new Date(it.start));
+        const days = Math.round((new Date(today) - new Date(sd)) / 86400000);
+        if (days >= 0 && days <= 60) seed = sd;
+      }
+      hist[it.id] = [[seed, it.p]];
+      histNew++;
+    } else if (pts[pts.length - 1][1] !== it.p) {
+      pts.push([today, it.p]);
+      histChanged++;
+    }
+  }
+  writeFileSync(join(ROOT, 'price-history.json'), JSON.stringify(hist));
+  console.log(`価格履歴: 新規 ${histNew} 件 / 価格変更 ${histChanged} 件 / 累計 ${Object.keys(hist).length} 件`);
+
   // PREV_IDS ← 差し替え前の ITEMS のID一覧
   const prevSpan = extractArray(html, 'var PREV_IDS =');
   html = html.slice(0, prevSpan.open) + JSON.stringify(oldIds) + html.slice(prevSpan.close + 1);
@@ -199,6 +232,12 @@ async function main() {
   setSpan('taCov', fmtNum(taCount));
   html = html.replace(/<a id="srcLink" href="[^"]*"([^>]*)>[^<]*<\/a>/,
     `<a id="srcLink" href="${DEALS_URL}"$1>Microsoft Store 公式セールページ</a>`);
+
+  // 価格履歴の埋め込み（現在の掲載分のみ）とスナップショット日
+  const histEmbed = {};
+  for (const it of items) if (hist[it.id]) histEmbed[it.id] = hist[it.id];
+  html = html.replace(/var HIST = \{[^}]*\};/, () => 'var HIST = ' + JSON.stringify(histEmbed) + ';');
+  html = html.replace(/var SNAP_DATE = "[^"]*";/, () => `var SNAP_DATE = "${today}";`);
 
   writeFileSync(INDEX, html);
   console.log(`更新完了: ${newTs} 時点 / 掲載 ${items.length} 件 / 新着 ${newCount} 件`);
