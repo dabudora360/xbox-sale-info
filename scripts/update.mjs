@@ -1,6 +1,5 @@
 // Xboxセール情報 自動更新スクリプト（依存ライブラリなし / Node 18+）
-// 1. ブラックフライデーの専用チャンネルから対象商品IDを全件取得
-//    （チャンネルが空・取得失敗の場合は Microsoft Store のセール一覧に自動で切替）
+// 1. Microsoft Store のセール一覧ページから対象商品IDを全件取得
 // 2. DisplayCatalog API で価格・定価・開始/終了日時・日英タイトル・表紙を補完
 // 3. index.html の ITEMS / PREV_IDS / 日時・件数・出典表記を差し替える
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -10,9 +9,6 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const INDEX = join(ROOT, 'index.html');
 
-const BF_CHANNEL_ID = 'CampsiteChannel.Games.sale.2026.BlackFridaySale1119';
-const BF_CHANNEL_KEY = 'BROWSE_CHANNELID=CAMPSITECHANNEL.GAMES.SALE.2026.BLACKFRIDAYSALE1119_FILTERS=';
-const BF_PAGE_URL = `https://www.xbox.com/ja-JP/games/browse/${BF_CHANNEL_ID}`;
 const DEALS_URL = 'https://www.microsoft.com/ja-jp/store/deals/games/xbox';
 const CATALOG = 'https://displaycatalog.mp.microsoft.com/v7.0/products';
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept-Language': 'ja-JP' };
@@ -53,43 +49,7 @@ function extractArray(html, marker) {
   throw new Error(`array not closed: ${marker}`);
 }
 
-// ---- ソース1: ブラックフライデー専用チャンネル ----
-async function fetchBlackFridayIds() {
-  const res = await fetchRetry(BF_PAGE_URL, { headers: UA });
-  const html = await res.text();
-  const ct0 = html.match(/"encodedCT":"([^"]+)"/)?.[1];
-  const total = Number(html.match(/"totalItems":(\d+)/)?.[1] || 0);
-  if (!ct0 || !total) return { ids: [], total: 0 };
-  const ids = [];
-  const seen = new Set();
-  const push = (id) => { if (id && !seen.has(id)) { seen.add(id); ids.push(id); } };
-  // 1ページ目はページHTML内の channelData に埋め込まれている
-  const cdIdx = html.indexOf('"channelData":');
-  if (cdIdx >= 0) {
-    const block = extractArray(html.slice(cdIdx), '"products":');
-    for (const m of block.text.matchAll(/"productId":"([0-9A-Z]{12})"/g)) push(m[1]);
-  }
-  // 2ページ目以降は emerald API をカーソルで辿る
-  let ct = ct0;
-  for (let page = 0; page < 200; page++) {
-    const decoded = JSON.parse(Buffer.from(ct, 'base64').toString('utf8'));
-    if (!decoded.HasMore) break;
-    const r = await fetchRetry('https://emerald.xboxservices.com/xboxcomfd/browse?locale=ja-JP', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ms-api-version': '1.1', 'MS-CV': `ghpages-update.${Date.now()}`, Accept: 'application/json' },
-      body: JSON.stringify({ ChannelId: BF_CHANNEL_ID, EncodedCT: ct, ReturnFilters: false, ChannelKeyToBeUsedInResponse: BF_CHANNEL_KEY }),
-    });
-    const j = await r.json();
-    const chan = Object.values(j.channels || {})[0];
-    if (!chan) break;
-    for (const p of chan.products || []) push(p.productId);
-    if (!chan.encodedCT || chan.encodedCT === ct) break;
-    ct = chan.encodedCT;
-  }
-  return { ids, total };
-}
-
-// ---- ソース2（予備）: Microsoft Store セール一覧ページ ----
+// ---- ソース: Microsoft Store セール一覧ページ ----
 async function fetchDealsIds() {
   const ids = [];
   const seen = new Set();
@@ -162,15 +122,8 @@ async function main() {
   const oldTs = html.match(/価格は (\d{4}年\d{1,2}月\d{1,2}日 \d{1,2}:\d{2})（日本時間）時点/)?.[1];
   if (!oldTs) throw new Error('現在のデータ日時が見つかりません');
 
-  // ソース決定: BFチャンネル優先、空なら通常セールへ
-  let source = 'blackfriday';
-  let { ids, total } = await fetchBlackFridayIds();
-  if (ids.length < 10) {
-    console.log(`BFチャンネルが空のため通常セールへ切替 (BF取得 ${ids.length} 件)`);
-    source = 'deals';
-    ({ ids, total } = await fetchDealsIds());
-  }
-  console.log(`ソース: ${source} / 対象 ${total} 件 / ID取得 ${ids.length} 件`);
+  const { ids, total } = await fetchDealsIds();
+  console.log(`ソース: Microsoft Store セール一覧 / 対象 ${total} 件 / ID取得 ${ids.length} 件`);
   if (ids.length < 10) throw new Error('商品IDをほとんど取得できませんでした。中断します');
 
   const [ja, en] = [await fetchCatalog(ids, 'ja-JP'), await fetchCatalog(ids, 'en-US')];
@@ -225,15 +178,14 @@ async function main() {
   html = html.split('@@OLDTS@@').join(oldTs);
 
   // 出典表記と件数メモ
-  const isBf = source === 'blackfriday';
   const setSpan = (id, value) => { html = html.replace(new RegExp(`(<span id="${id}">)[^<]*(</span>)`), `$1${value}$2`); };
-  setSpan('srcName', isBf ? '「ブラックフライデー」' : '');
-  setSpan('srcRef', isBf ? 'Xbox 公式「ブラックフライデー」ページ' : 'Microsoft Store 公式セールページ');
+  setSpan('srcName', '');
+  setSpan('srcRef', 'Microsoft Store 公式セールページ');
   setSpan('covTotal', fmtNum(total));
   setSpan('covDropped', fmtNum(dropped));
   setSpan('covKept', fmtNum(items.length));
   html = html.replace(/<a id="srcLink" href="[^"]*"([^>]*)>[^<]*<\/a>/,
-    `<a id="srcLink" href="${isBf ? BF_PAGE_URL : DEALS_URL}"$1>${isBf ? 'Xbox 公式「ブラックフライデー」ページ' : 'Microsoft Store 公式セールページ'}</a>`);
+    `<a id="srcLink" href="${DEALS_URL}"$1>Microsoft Store 公式セールページ</a>`);
 
   writeFileSync(INDEX, html);
   console.log(`更新完了: ${newTs} 時点 / 掲載 ${items.length} 件 / 新着 ${newCount} 件`);
