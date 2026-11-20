@@ -1,10 +1,10 @@
 name: Xboxセール情報 自動更新
 
-# 火曜・木曜 09:30（日本時間）に自動実行。GitHub のスケジュールは UTC 指定なので 00:30 UTC = 09:30 JST
+# 毎日 09:30（日本時間）に自動実行。GitHub のスケジュールは UTC 指定なので 00:30 UTC = 09:30 JST
 # Actions タブから手動実行（workflow_dispatch）も可能
 on:
   schedule:
-    - cron: '30 0 * * 2,4'
+    - cron: '30 0 * * *'  # Runs at 00:30 daily
   workflow_dispatch:
 
 permissions:
@@ -20,15 +20,12 @@ jobs:
     steps:
       - name: チェックアウト
         uses: actions/checkout@v4
-
       - name: Node セットアップ
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
       - name: セール情報を取得して index.html を更新
         run: node scripts/update.mjs
-
       - name: 変更があればコミット＆プッシュ
         run: |
           git config user.name 'github-actions[bot]'
