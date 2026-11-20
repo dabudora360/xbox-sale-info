@@ -1,0 +1,242 @@
+// Xboxセール情報 自動更新スクリプト（依存ライブラリなし / Node 18+）
+// 1. ブラックフライデーの専用チャンネルから対象商品IDを全件取得
+//    （チャンネルが空・取得失敗の場合は Microsoft Store のセール一覧に自動で切替）
+// 2. DisplayCatalog API で価格・定価・開始/終了日時・日英タイトル・表紙を補完
+// 3. index.html の ITEMS / PREV_IDS / 日時・件数・出典表記を差し替える
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const INDEX = join(ROOT, 'index.html');
+
+const BF_CHANNEL_ID = 'CampsiteChannel.Games.sale.2026.BlackFridaySale1119';
+const BF_CHANNEL_KEY = 'BROWSE_CHANNELID=CAMPSITECHANNEL.GAMES.SALE.2026.BLACKFRIDAYSALE1119_FILTERS=';
+const BF_PAGE_URL = `https://www.xbox.com/ja-JP/games/browse/${BF_CHANNEL_ID}`;
+const DEALS_URL = 'https://www.microsoft.com/ja-jp/store/deals/games/xbox';
+const CATALOG = 'https://displaycatalog.mp.microsoft.com/v7.0/products';
+const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept-Language': 'ja-JP' };
+
+// 表紙の掲載が見送られた商品（内容チェックで弾かれたもの）。タイトル表示のプレースホルダになる
+const NO_COVER = new Set(['9PGL25P5ZCSJ', '9PF0B4L7Q9D6', '9NLJVL7RC4JR', '9N951JR9T3FX', '9NSW13NTBJHW', '9MSVPJCHHRPR', 'C52WCN7GNXR3']);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function fetchRetry(url, opts = {}, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.ok) return res;
+      last = new Error(`HTTP ${res.status} ${url}`);
+    } catch (e) { last = e; }
+    await sleep(1000 * (i + 1));
+  }
+  throw last;
+}
+
+// 文字列内を考慮しながら [ ... ] の範囲を取り出す
+function extractArray(html, marker) {
+  const start = html.indexOf(marker);
+  if (start < 0) throw new Error(`marker not found: ${marker}`);
+  const open = html.indexOf('[', start);
+  let depth = 0, inStr = false, esc = false;
+  for (let i = open; i < html.length; i++) {
+    const c = html[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === '[') depth++;
+    else if (c === ']' && --depth === 0) return { text: html.slice(open, i + 1), open, close: i };
+  }
+  throw new Error(`array not closed: ${marker}`);
+}
+
+// ---- ソース1: ブラックフライデー専用チャンネル ----
+async function fetchBlackFridayIds() {
+  const res = await fetchRetry(BF_PAGE_URL, { headers: UA });
+  const html = await res.text();
+  const ct0 = html.match(/"encodedCT":"([^"]+)"/)?.[1];
+  const total = Number(html.match(/"totalItems":(\d+)/)?.[1] || 0);
+  if (!ct0 || !total) return { ids: [], total: 0 };
+  const ids = [];
+  const seen = new Set();
+  const push = (id) => { if (id && !seen.has(id)) { seen.add(id); ids.push(id); } };
+  // 1ページ目はページHTML内の channelData に埋め込まれている
+  const cdIdx = html.indexOf('"channelData":');
+  if (cdIdx >= 0) {
+    const block = extractArray(html.slice(cdIdx), '"products":');
+    for (const m of block.text.matchAll(/"productId":"([0-9A-Z]{12})"/g)) push(m[1]);
+  }
+  // 2ページ目以降は emerald API をカーソルで辿る
+  let ct = ct0;
+  for (let page = 0; page < 200; page++) {
+    const decoded = JSON.parse(Buffer.from(ct, 'base64').toString('utf8'));
+    if (!decoded.HasMore) break;
+    const r = await fetchRetry('https://emerald.xboxservices.com/xboxcomfd/browse?locale=ja-JP', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-ms-api-version': '1.1', 'MS-CV': `ghpages-update.${Date.now()}`, Accept: 'application/json' },
+      body: JSON.stringify({ ChannelId: BF_CHANNEL_ID, EncodedCT: ct, ReturnFilters: false, ChannelKeyToBeUsedInResponse: BF_CHANNEL_KEY }),
+    });
+    const j = await r.json();
+    const chan = Object.values(j.channels || {})[0];
+    if (!chan) break;
+    for (const p of chan.products || []) push(p.productId);
+    if (!chan.encodedCT || chan.encodedCT === ct) break;
+    ct = chan.encodedCT;
+  }
+  return { ids, total };
+}
+
+// ---- ソース2（予備）: Microsoft Store セール一覧ページ ----
+async function fetchDealsIds() {
+  const ids = [];
+  const seen = new Set();
+  let total = Infinity;
+  for (let skip = 0; skip < 10000 && ids.length < total; skip += 50) {
+    const url = skip === 0 ? DEALS_URL : `${DEALS_URL}?skip=${skip}`;
+    const res = await fetchRetry(url, { headers: UA });
+    const html = await res.text();
+    if (skip === 0) total = Number(html.match(/"totalProducts":(\d+)/)?.[1] || 0);
+    let found = 0;
+    for (const m of html.matchAll(/\\?"productId\\?":\\?"([0-9A-Za-z]{12})\\?"/g)) {
+      const id = m[1].toUpperCase();
+      if (!seen.has(id)) { seen.add(id); ids.push(id); found++; }
+    }
+    if (found === 0) break;
+  }
+  return { ids, total: Number.isFinite(total) ? total : ids.length };
+}
+
+// ---- DisplayCatalog で商品情報を補完 ----
+function pickPriceAndDates(product) {
+  let best = null;
+  for (const dsa of product.DisplaySkuAvailabilities || []) {
+    if (dsa.Sku?.SkuType !== 'full') continue;
+    for (const av of dsa.Availabilities || []) {
+      const price = av.Price || av.OrderManagementData?.Price;
+      if (!price || price.CurrencyCode !== 'JPY' || !(price.MSRP > 0)) continue;
+      if (!(av.Actions || []).includes('Purchase')) continue;
+      if (!best || price.ListPrice < best.price.ListPrice) best = { price, cond: av.Conditions || {} };
+    }
+  }
+  return best;
+}
+function pickImage(lp) {
+  const imgs = lp.Images || [];
+  for (const purpose of ['Poster', 'BoxArt', 'FeaturePromotionalSquareArt']) {
+    const hit = imgs.find((i) => i.ImagePurpose === purpose);
+    if (hit?.Uri) return `https:${hit.Uri}?w=512`;
+  }
+  return null;
+}
+function slugify(en) {
+  const s = en.toLowerCase().replace(/[''’]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return s || 'x';
+}
+async function fetchCatalog(ids, lang) {
+  const map = new Map();
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    const res = await fetchRetry(`${CATALOG}?bigIds=${chunk.join(',')}&market=JP&languages=${lang}`, { headers: UA });
+    const j = await res.json();
+    for (const p of j.Products || []) map.set(p.ProductId, p);
+    await sleep(150);
+  }
+  return map;
+}
+
+function nowJstLabel() {
+  const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+  const v = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${v.year}年${Number(v.month)}月${Number(v.day)}日 ${v.hour}:${v.minute}`;
+}
+const fmtNum = (n) => n.toLocaleString('en-US');
+
+async function main() {
+  let html = readFileSync(INDEX, 'utf8');
+  const itemsSpan = extractArray(html, 'var ITEMS =');
+  const oldItems = JSON.parse(itemsSpan.text);
+  const oldIds = oldItems.map((it) => it.id);
+  const oldTs = html.match(/価格は (\d{4}年\d{1,2}月\d{1,2}日 \d{1,2}:\d{2})（日本時間）時点/)?.[1];
+  if (!oldTs) throw new Error('現在のデータ日時が見つかりません');
+
+  // ソース決定: BFチャンネル優先、空なら通常セールへ
+  let source = 'blackfriday';
+  let { ids, total } = await fetchBlackFridayIds();
+  if (ids.length < 10) {
+    console.log(`BFチャンネルが空のため通常セールへ切替 (BF取得 ${ids.length} 件)`);
+    source = 'deals';
+    ({ ids, total } = await fetchDealsIds());
+  }
+  console.log(`ソース: ${source} / 対象 ${total} 件 / ID取得 ${ids.length} 件`);
+  if (ids.length < 10) throw new Error('商品IDをほとんど取得できませんでした。中断します');
+
+  const [ja, en] = [await fetchCatalog(ids, 'ja-JP'), await fetchCatalog(ids, 'en-US')];
+  const items = [];
+  let dropped = 0;
+  for (const id of ids) {
+    const p = ja.get(id);
+    const lp = p?.LocalizedProperties?.[0];
+    const picked = p ? pickPriceAndDates(p) : null;
+    if (!p || !lp || !picked) { dropped++; continue; }
+    const price = picked.price.ListPrice;
+    const msrp = picked.price.MSRP;
+    const pct = Math.round((1 - price / msrp) * 100);
+    if (pct <= 0) { dropped++; continue; }
+    const enTitle = en.get(id)?.LocalizedProperties?.[0]?.ProductTitle || lp.ProductTitle;
+    const item = {
+      id,
+      t: lp.ProductTitle,
+      en: enTitle,
+      pub: lp.PublisherName || '',
+      p: price,
+      m: msrp,
+      pct,
+      end: picked.cond.EndDate,
+      url: `https://www.xbox.com/ja-JP/games/store/${slugify(enTitle)}/${id}`,
+      start: picked.cond.StartDate,
+    };
+    const img = NO_COVER.has(id) ? null : pickImage(lp);
+    if (img) item.img = img;
+    items.push(item);
+  }
+  console.log(`掲載 ${items.length} 件 / 除外 ${dropped} 件`);
+  if (items.length < 100) throw new Error('掲載件数が異常に少ないため中断します（ページを守るための安全装置）');
+
+  const prevSet = new Set(oldIds);
+  const newCount = items.filter((it) => !prevSet.has(it.id)).length;
+  console.log(`新着 ${newCount} 件`);
+
+  // PREV_IDS ← 差し替え前の ITEMS のID一覧
+  const prevSpan = extractArray(html, 'var PREV_IDS =');
+  html = html.slice(0, prevSpan.open) + JSON.stringify(oldIds) + html.slice(prevSpan.close + 1);
+  // ITEMS 差し替え（PREV 差し替えで位置がずれるため再取得）
+  const span2 = extractArray(html, 'var ITEMS =');
+  html = html.slice(0, span2.open) + JSON.stringify(items) + html.slice(span2.close + 1);
+
+  // 新着メモの「前回リスト」表記 ← いま差し替えた版の日時と件数（タイムスタンプ一括置換より先に退避）
+  html = html.replace(/(<span id="prevTs">)[^<]*(<\/span>)/, `$1@@OLDTS@@$2`);
+  html = html.replace(/(<span id="prevCount">)[^<]*(<\/span>)/, `$1${fmtNum(oldItems.length)}$2`);
+  // データ日時の一括更新
+  const newTs = nowJstLabel();
+  html = html.split(oldTs).join(newTs);
+  html = html.split('@@OLDTS@@').join(oldTs);
+
+  // 出典表記と件数メモ
+  const isBf = source === 'blackfriday';
+  const setSpan = (id, value) => { html = html.replace(new RegExp(`(<span id="${id}">)[^<]*(</span>)`), `$1${value}$2`); };
+  setSpan('srcName', isBf ? '「ブラックフライデー」' : '');
+  setSpan('srcRef', isBf ? 'Xbox 公式「ブラックフライデー」ページ' : 'Microsoft Store 公式セールページ');
+  setSpan('covTotal', fmtNum(total));
+  setSpan('covDropped', fmtNum(dropped));
+  setSpan('covKept', fmtNum(items.length));
+  html = html.replace(/<a id="srcLink" href="[^"]*"([^>]*)>[^<]*<\/a>/,
+    `<a id="srcLink" href="${isBf ? BF_PAGE_URL : DEALS_URL}"$1>${isBf ? 'Xbox 公式「ブラックフライデー」ページ' : 'Microsoft Store 公式セールページ'}</a>`);
+
+  writeFileSync(INDEX, html);
+  console.log(`更新完了: ${newTs} 時点 / 掲載 ${items.length} 件 / 新着 ${newCount} 件`);
+}
+
+main().catch((e) => { console.error('更新失敗:', e); process.exit(1); });
