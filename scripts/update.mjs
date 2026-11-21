@@ -108,6 +108,37 @@ async function fetchCatalog(ids, lang) {
   return map;
 }
 
+// ---- Game Pass 収録タイトル（公式カタログのリスト群） ----
+const GP_SIGLS = [
+  'f6f1f99f-9b49-4ccd-b3bf-4d9767a77f5e', // コンソール全タイトル
+  '609d944c-d395-4c0a-9ea4-e9f39b52c1ad', // PC 全タイトル
+  'b8900d09-a491-44cc-916e-32b5acae621b', // EA Play（コンソール）
+  '1d33fbb9-b895-4732-a8ca-a55c8b99fa2c', // EA Play（PC）
+  'aed03b50-b954-4ee4-a426-fe1686b64f85', // Ubisoft+（コンソール）
+  '7def2ea6-d4d8-405b-83cf-4e7229a7bf93', // Ubisoft+（PC）
+];
+async function fetchGamePassIds() {
+  const set = new Set();
+  for (const id of GP_SIGLS) {
+    try {
+      const res = await fetchRetry(`https://catalog.gamepass.com/sigls/v2?id=${id}&language=ja-jp&market=JP`, { headers: UA });
+      const j = await res.json();
+      for (const x of j || []) if (x && x.id) set.add(String(x.id).toUpperCase());
+    } catch (e) { console.log(`Game Passリスト取得に失敗 (${id}): ${e.message}`); }
+  }
+  return set;
+}
+
+// ---- DLC単品の推定（カタログに種別項目が無いためタイトルから判定。本体・バンドルは除外） ----
+const DLC_KW = /(アップグレード|アドオン|シーズンパス|拡張|エクスパンション|追加コンテンツ|追加シナリオ|upgrade|add-on|add on|season pass|expansion|\bdlc\b)/i;
+const BUNDLE_KW = /(バンドル|コレクション|bundle|collection)/i;
+function isStandaloneDlc(title, enTitle) {
+  const s = `${title} ${enTitle || ''}`;
+  if (s.includes('+')) return false;
+  if (BUNDLE_KW.test(s)) return false;
+  return DLC_KW.test(s);
+}
+
 function nowJstLabel() {
   const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
   const v = Object.fromEntries(parts.map((p) => [p.type, p.value]));
@@ -138,6 +169,8 @@ async function main() {
   // 実績データ（ta-extras.json があればマージする）
   let extras = {};
   try { extras = JSON.parse(readFileSync(join(ROOT, 'ta-extras.json'), 'utf8')); } catch { extras = {}; }
+  const gpSet = await fetchGamePassIds();
+  console.log(`Game Pass収録リスト ${gpSet.size} 件`);
 
   const items = [];
   let dropped = 0;
@@ -165,6 +198,8 @@ async function main() {
     };
     const img = NO_COVER.has(id) ? null : pickImage(lp);
     if (img) item.img = img;
+    if (gpSet.has(id)) item.gp = 1;
+    if (isStandaloneDlc(lp.ProductTitle, enTitle)) item.dlc = 1;
     items.push(item);
   }
   console.log(`掲載 ${items.length} 件 / 除外 ${dropped} 件`);
@@ -177,6 +212,7 @@ async function main() {
     if (x) { it.x = x; taCount++; }
   }
   console.log(`実績データ付与 ${taCount} 件`);
+  console.log(`Game Pass付与 ${items.filter((it) => it.gp).length} 件 / DLC単品推定 ${items.filter((it) => it.dlc).length} 件`);
 
   const prevSet = new Set(oldIds);
   const newCount = items.filter((it) => !prevSet.has(it.id)).length;
