@@ -52,22 +52,27 @@ function extractArray(html, marker) {
 
 // ---- ソース: Microsoft Store セール一覧ページ ----
 async function fetchDealsIds() {
+  // MS側の応答で totalProducts が揺れる（例: 2275 と 2181 が混在し、ページの並びも
+  // 応答ごとにずれる）ため、1回の走査では取りこぼす。最大3回走査して和集合を取る。
   const ids = [];
   const seen = new Set();
-  let total = Infinity;
-  for (let skip = 0; skip < 10000 && ids.length < total; skip += 50) {
-    const url = skip === 0 ? DEALS_URL : `${DEALS_URL}?skip=${skip}`;
-    const res = await fetchRetry(url, { headers: UA });
-    const html = await res.text();
-    if (skip === 0) total = Number(html.match(/"totalProducts":(\d+)/)?.[1] || 0);
-    let found = 0;
-    for (const m of html.matchAll(/\\?"productId\\?":\\?"([0-9A-Za-z]{12})\\?"/g)) {
-      const id = m[1].toUpperCase();
-      if (!seen.has(id)) { seen.add(id); ids.push(id); found++; }
+  let total = 0;
+  for (let sweep = 0; sweep < 3; sweep++) {
+    const before = seen.size;
+    for (let skip = 0; skip < 10000 && (total === 0 || skip <= total); skip += 50) {
+      const url = skip === 0 ? DEALS_URL : `${DEALS_URL}?skip=${skip}`;
+      const res = await fetchRetry(url, { headers: UA });
+      const html = await res.text();
+      const t = Number(html.match(/"totalProducts":(\d+)/)?.[1] || 0);
+      if (t > total) total = t;
+      for (const m of html.matchAll(/\\?"productId\\?":\\?"([0-9A-Za-z]{12})\\?"/g)) {
+        const id = m[1].toUpperCase();
+        if (!seen.has(id)) { seen.add(id); ids.push(id); }
+      }
     }
-    if (found === 0) break;
+    if (seen.size === before) break;
   }
-  return { ids, total: Number.isFinite(total) ? total : ids.length };
+  return { ids, total: total || ids.length };
 }
 
 // ---- DisplayCatalog で商品情報を補完 ----
