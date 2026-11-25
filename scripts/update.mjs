@@ -11,6 +11,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const INDEX = join(ROOT, 'index.html');
 
 const DEALS_URL = 'https://www.microsoft.com/ja-jp/store/deals/games/xbox';
+const DEALS_URL_US = 'https://www.microsoft.com/en-us/store/deals/games/xbox';
 const CATALOG = 'https://displaycatalog.mp.microsoft.com/v7.0/products';
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept-Language': 'ja-JP' };
 
@@ -51,7 +52,7 @@ function extractArray(html, marker) {
 }
 
 // ---- ソース: Microsoft Store セール一覧ページ ----
-async function fetchDealsIds() {
+async function fetchDealsIds(baseUrl = DEALS_URL) {
   // MS側の応答で totalProducts が揺れる（例: 2275 と 2181 が混在し、ページの並びも
   // 応答ごとにずれる）ため、1回の走査では取りこぼす。最大3回走査して和集合を取る。
   const ids = [];
@@ -60,7 +61,7 @@ async function fetchDealsIds() {
   for (let sweep = 0; sweep < 3; sweep++) {
     const before = seen.size;
     for (let skip = 0; skip < 10000 && (total === 0 || skip <= total); skip += 50) {
-      const url = skip === 0 ? DEALS_URL : `${DEALS_URL}?skip=${skip}`;
+      const url = skip === 0 ? baseUrl : `${baseUrl}?skip=${skip}`;
       const res = await fetchRetry(url, { headers: UA });
       const html = await res.text();
       const t = Number(html.match(/"totalProducts":(\d+)/)?.[1] || 0);
@@ -76,13 +77,13 @@ async function fetchDealsIds() {
 }
 
 // ---- DisplayCatalog で商品情報を補完 ----
-function pickPriceAndDates(product) {
+function pickPriceAndDates(product, currency = 'JPY') {
   let best = null;
   for (const dsa of product.DisplaySkuAvailabilities || []) {
     if (dsa.Sku?.SkuType !== 'full') continue;
     for (const av of dsa.Availabilities || []) {
       const price = av.Price || av.OrderManagementData?.Price;
-      if (!price || price.CurrencyCode !== 'JPY' || !(price.MSRP > 0)) continue;
+      if (!price || price.CurrencyCode !== currency || !(price.MSRP > 0)) continue;
       if (!(av.Actions || []).includes('Purchase')) continue;
       if (!best || price.ListPrice < best.price.ListPrice) best = { price, cond: av.Conditions || {} };
     }
@@ -101,11 +102,11 @@ function slugify(en) {
   const s = en.toLowerCase().replace(/[''’]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return s || 'x';
 }
-async function fetchCatalog(ids, lang) {
+async function fetchCatalog(ids, lang, market = 'JP') {
   const map = new Map();
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50);
-    const res = await fetchRetry(`${CATALOG}?bigIds=${chunk.join(',')}&market=JP&languages=${lang}`, { headers: UA });
+    const res = await fetchRetry(`${CATALOG}?bigIds=${chunk.join(',')}&market=${market}&languages=${lang}`, { headers: UA });
     const j = await res.json();
     for (const p of j.Products || []) map.set(p.ProductId, p);
     await sleep(150);
@@ -122,11 +123,11 @@ const GP_SIGLS = [
   'aed03b50-b954-4ee4-a426-fe1686b64f85', // Ubisoft+（コンソール）
   '7def2ea6-d4d8-405b-83cf-4e7229a7bf93', // Ubisoft+（PC）
 ];
-async function fetchGamePassIds() {
+async function fetchGamePassIds(market = 'JP', langTag = 'ja-jp') {
   const set = new Set();
   for (const id of GP_SIGLS) {
     try {
-      const res = await fetchRetry(`https://catalog.gamepass.com/sigls/v2?id=${id}&language=ja-jp&market=JP`, { headers: UA });
+      const res = await fetchRetry(`https://catalog.gamepass.com/sigls/v2?id=${id}&language=${langTag}&market=${market}`, { headers: UA });
       const j = await res.json();
       for (const x of j || []) if (x && x.id) set.add(String(x.id).toUpperCase());
     } catch (e) { console.log(`Game Passリスト取得に失敗 (${id}): ${e.message}`); }
@@ -162,6 +163,8 @@ async function main() {
   let html = readFileSync(INDEX, 'utf8');
   const itemsSpan = extractArray(html, 'var ITEMS =');
   const oldItems = JSON.parse(itemsSpan.text);
+  let oldUsItems = [];
+  try { oldUsItems = JSON.parse(extractArray(html, 'var ITEMS_US =').text); } catch { oldUsItems = []; }
   const oldIds = oldItems.map((it) => it.id);
   const oldTs = html.match(/価格は (\d{4}年\d{1,2}月\d{1,2}日 \d{1,2}:\d{2})（日本時間）時点/)?.[1];
   if (!oldTs) throw new Error('現在のデータ日時が見つかりません');
@@ -218,7 +221,7 @@ async function main() {
   }
   console.log(`実績データ付与 ${taCount} 件`);
 
-  // 史上最安データ（deku-extras.json があればマージする）
+  // 過去最安データ（deku-extras.json があればマージする）
   let dekuExtras = {};
   try { dekuExtras = JSON.parse(readFileSync(join(ROOT, 'deku-extras.json'), 'utf8')); } catch { dekuExtras = {}; }
   let dekuCount = 0;
@@ -228,6 +231,53 @@ async function main() {
   }
   console.log(`過去最安データ付与 ${dekuCount} 件`);
   console.log(`Game Pass付与 ${items.filter((it) => it.gp).length} 件 / DLC単品推定 ${items.filter((it) => it.dlc).length} 件`);
+
+  // ---- USストア分（en-us のセール一覧 → market=US で価格取得。失敗したら前回分を維持） ----
+  let usItems = null;
+  try {
+    const us = await fetchDealsIds(DEALS_URL_US);
+    console.log(`US: 対象 ${us.total} 件 / ID取得 ${us.ids.length} 件`);
+    const usCat = await fetchCatalog(us.ids, 'en-US', 'US');
+    const usGp = await fetchGamePassIds('US', 'en-us');
+    console.log(`US: Game Pass収録リスト ${usGp.size} 件`);
+    const built = [];
+    let usDropped = 0;
+    for (const id of us.ids) {
+      const p = usCat.get(id);
+      const lp = p?.LocalizedProperties?.[0];
+      const picked = p ? pickPriceAndDates(p, 'USD') : null;
+      if (!p || !lp || !picked) { usDropped++; continue; }
+      const price = picked.price.ListPrice;
+      const msrp = picked.price.MSRP;
+      const pct = Math.round((1 - price / msrp) * 100);
+      if (pct <= 0) { usDropped++; continue; }
+      const title = lp.ProductTitle;
+      const item = {
+        id,
+        t: title,
+        en: title,
+        pub: lp.PublisherName || '',
+        p: price,
+        m: msrp,
+        pct,
+        end: picked.cond.EndDate,
+        url: `https://www.xbox.com/en-US/games/store/${slugify(title)}/${id}`,
+        start: picked.cond.StartDate,
+      };
+      const img = NO_COVER.has(id) ? null : pickImage(lp);
+      if (img) item.img = img;
+      if (usGp.has(id)) item.gp = 1;
+      if (isStandaloneDlc(title, title)) item.dlc = 1;
+      const x = extras[id];
+      if (x) item.x = x;
+      built.push(item);
+    }
+    console.log(`US: 掲載 ${built.length} 件 / 除外 ${usDropped} 件`);
+    if (built.length >= 100) usItems = built;
+    else console.log('US: 掲載件数が異常に少ないため前回分を維持します');
+  } catch (e) {
+    console.log(`USストア取得に失敗（前回分を維持）: ${e.message}`);
+  }
 
   const prevSet = new Set(oldIds);
   const newCount = items.filter((it) => !prevSet.has(it.id)).length;
@@ -264,6 +314,9 @@ async function main() {
   // ITEMS 差し替え（PREV 差し替えで位置がずれるため再取得）
   const span2 = extractArray(html, 'var ITEMS =');
   html = html.slice(0, span2.open) + JSON.stringify(items) + html.slice(span2.close + 1);
+  // ITEMS_US 差し替え（取得できなかった回は前回分をそのまま埋め戻す）
+  const spanUs = extractArray(html, 'var ITEMS_US =');
+  html = html.slice(0, spanUs.open) + JSON.stringify(usItems ?? oldUsItems) + html.slice(spanUs.close + 1);
 
   // 新着メモの「前回リスト」表記 ← いま差し替えた版の日時と件数（タイムスタンプ一括置換より先に退避）
   html = html.replace(/(<span id="prevTs">)[^<]*(<\/span>)/, `$1@@OLDTS@@$2`);
