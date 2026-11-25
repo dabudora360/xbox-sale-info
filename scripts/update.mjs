@@ -165,6 +165,9 @@ async function main() {
   const oldItems = JSON.parse(itemsSpan.text);
   let oldUsItems = [];
   try { oldUsItems = JSON.parse(extractArray(html, 'var ITEMS_US =').text); } catch { oldUsItems = []; }
+  let oldUsCov = [0, 0, 0];
+  const covM = html.match(/var US_COV = \[([\d,\s]*)\];/);
+  if (covM) oldUsCov = covM[1].split(',').map((v) => Number(v.trim()) || 0);
   const oldIds = oldItems.map((it) => it.id);
   const oldTs = html.match(/価格は (\d{4}年\d{1,2}月\d{1,2}日 \d{1,2}:\d{2})（日本時間）時点/)?.[1];
   if (!oldTs) throw new Error('現在のデータ日時が見つかりません');
@@ -234,6 +237,7 @@ async function main() {
 
   // ---- USストア分（en-us のセール一覧 → market=US で価格取得。失敗したら前回分を維持） ----
   let usItems = null;
+  let usCov = null;
   try {
     const us = await fetchDealsIds(DEALS_URL_US);
     console.log(`US: 対象 ${us.total} 件 / ID取得 ${us.ids.length} 件`);
@@ -273,7 +277,7 @@ async function main() {
       built.push(item);
     }
     console.log(`US: 掲載 ${built.length} 件 / 除外 ${usDropped} 件`);
-    if (built.length >= 100) usItems = built;
+    if (built.length >= 100) { usItems = built; usCov = [us.total, usDropped, built.length]; }
     else console.log('US: 掲載件数が異常に少ないため前回分を維持します');
   } catch (e) {
     console.log(`USストア取得に失敗（前回分を維持）: ${e.message}`);
@@ -317,6 +321,7 @@ async function main() {
   // ITEMS_US 差し替え（取得できなかった回は前回分をそのまま埋め戻す）
   const spanUs = extractArray(html, 'var ITEMS_US =');
   html = html.slice(0, spanUs.open) + JSON.stringify(usItems ?? oldUsItems) + html.slice(spanUs.close + 1);
+  html = html.replace(/var US_COV = \[[\d,\s]*\];/, () => 'var US_COV = [' + (usCov ?? oldUsCov).join(', ') + '];');
 
   // 新着メモの「前回リスト」表記 ← いま差し替えた版の日時と件数（タイムスタンプ一括置換より先に退避）
   html = html.replace(/(<span id="prevTs">)[^<]*(<\/span>)/, `$1@@OLDTS@@$2`);
