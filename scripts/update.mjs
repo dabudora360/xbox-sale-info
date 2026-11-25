@@ -226,7 +226,7 @@ async function main() {
     const low = dekuExtras[it.id];
     if (low) { it.dlow = low; dekuCount++; }
   }
-  console.log(`史上最安データ付与 ${dekuCount} 件`);
+  console.log(`過去最安データ付与 ${dekuCount} 件`);
   console.log(`Game Pass付与 ${items.filter((it) => it.gp).length} 件 / DLC単品推定 ${items.filter((it) => it.dlc).length} 件`);
 
   const prevSet = new Set(oldIds);
