@@ -217,6 +217,16 @@ async function main() {
     if (x) { it.x = x; taCount++; }
   }
   console.log(`実績データ付与 ${taCount} 件`);
+
+  // 史上最安データ（deku-extras.json があればマージする）
+  let dekuExtras = {};
+  try { dekuExtras = JSON.parse(readFileSync(join(ROOT, 'deku-extras.json'), 'utf8')); } catch { dekuExtras = {}; }
+  let dekuCount = 0;
+  for (const it of items) {
+    const low = dekuExtras[it.id];
+    if (low) { it.dlow = low; dekuCount++; }
+  }
+  console.log(`史上最安データ付与 ${dekuCount} 件`);
   console.log(`Game Pass付与 ${items.filter((it) => it.gp).length} 件 / DLC単品推定 ${items.filter((it) => it.dlc).length} 件`);
 
   const prevSet = new Set(oldIds);
